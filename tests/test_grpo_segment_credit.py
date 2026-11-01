@@ -1,7 +1,10 @@
 import unittest
 
-from scripts.grpo_segment_credit import (char_spans_to_token_ranges, first_token_covering, plan_completion, probe_text,
-                                         segment_credits, select_boundaries, split_rationale, token_credit_rows)
+import random
+
+from scripts.grpo_segment_credit import (char_spans_to_token_ranges, first_token_covering, group_centered, plan_completion,
+                                         probe_text, segment_credits, select_boundaries, shuffle_credits, split_rationale,
+                                         token_credit_rows, uniform_credits)
 
 
 class CharTokenizer:
@@ -90,6 +93,41 @@ class PureFunctionTests(unittest.TestCase):
 
     def test_probe_text_format(self):
         self.assertEqual(probe_text("P", "甲乙"), "P解析：甲乙\n答案：")
+
+
+class ControlModeTests(unittest.TestCase):
+    def test_uniform_keeps_the_token_mass_and_flattens_the_allocation(self):
+        ranges = [(0, 3), (4, 5), None, (6, 11)]       # 4, 2, 0 and 6 tokens
+        credits = [0.4, -0.2, 0.9, 0.1]
+        uniform = uniform_credits(ranges, credits)
+        mean = (4 * 0.4 + 2 * -0.2 + 6 * 0.1) / 12
+        self.assertEqual(uniform[0], uniform[1])
+        self.assertEqual(uniform[1], uniform[3])
+        self.assertAlmostEqual(uniform[0], mean)
+        self.assertEqual(uniform[2], 0.9)                 # unaligned segment: untouched, carries no tokens anyway
+        before = sum(token_credit_rows(12, ranges, credits))
+        after = sum(token_credit_rows(12, ranges, uniform))
+        self.assertAlmostEqual(before, after)
+        self.assertEqual(uniform_credits([None, None], [0.3, 0.2]), [0.3, 0.2])
+        self.assertEqual(uniform_credits([], []), [])
+
+    def test_shuffled_keeps_the_multiset_and_never_returns_the_identity(self):
+        credits = [0.1, 0.2, 0.3, 0.4, 0.5]
+        for seed in range(50):
+            shuffled = shuffle_credits(credits, random.Random(seed))
+            self.assertEqual(sorted(shuffled), credits)
+            self.assertNotEqual(shuffled, credits)
+        for seed in range(20):
+            self.assertEqual(shuffle_credits([0.7, 0.9], random.Random(seed)), [0.9, 0.7])
+        self.assertEqual(shuffle_credits([0.5], random.Random(0)), [0.5])
+        self.assertEqual(shuffle_credits([], random.Random(0)), [])
+
+    def test_group_centering_matches_reward_shaping(self):
+        centred = group_centered([0.2, 0.4, 0.6, 1.0, 1.0, 1.0], 3)
+        for got, want in zip(centred, [-0.2, 0.0, 0.2, 0.0, 0.0, 0.0]):
+            self.assertAlmostEqual(got, want)
+        with self.assertRaises(ValueError):
+            group_centered([0.1, 0.2, 0.3], 2)
 
 
 if __name__ == "__main__":

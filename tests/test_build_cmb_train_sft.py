@@ -61,7 +61,8 @@ class BuildCmbTrainTests(unittest.TestCase):
             self.assertEqual(stats["dropped_question_type"], 1)
             self.assertEqual(stats["internal_val"], 1)
             self.assertEqual(stats["cmb_train_kept"], 2)
-            self.assertEqual(report["near_duplicate_method"], "bruteforce")
+            # the backend depends on whether datasketch is installed; the counts above must not
+            self.assertIn(report["near_duplicate_method"], ("bruteforce", "minhash_lsh"))
             reasons = {r["reason"] for r in removed}
             self.assertEqual(reasons, {"exact_stem", "near_duplicate"})
             sources = report["final_by_source"]

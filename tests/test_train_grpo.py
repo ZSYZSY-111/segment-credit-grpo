@@ -112,6 +112,8 @@ def make_args(**overrides):
         "local_files_only": False,
         "check_only": True,
         "max_eval_samples": 256,
+        "segment_credit_lambda": 0.0,
+        "credit_mode": "segment",
     }
     values.update(overrides)
     return Namespace(**values)
@@ -149,6 +151,19 @@ class GeometryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_args(make_args(per_device_eval_batch_size=3, num_generations_eval=2))
         self.assertEqual(validate_args(make_args())["completions_per_step"], 256)
+
+    def test_credit_modes_need_lambda_cot_and_unscaled_rewards(self):
+        cot = {"reward_mode": MODE_COT, "segment_credit_lambda": 2.0}
+        for mode in ("segment", "uniform", "shuffled", "sequence"):
+            validate_args(make_args(credit_mode=mode, **cot))
+        with self.assertRaises(ValueError):
+            validate_args(make_args(credit_mode="uniform", reward_mode=MODE_COT, segment_credit_lambda=0.0))
+        with self.assertRaises(ValueError):
+            validate_args(make_args(credit_mode="sequence", scale_rewards="group", **cot))
+        with self.assertRaises(ValueError):
+            validate_args(make_args(credit_mode="segment", reward_mode=MODE_DIRECT, segment_credit_lambda=2.0))
+        with self.assertRaises(ValueError):
+            validate_args(make_args(credit_mode="nonsense", **cot))
 
 
 class ConfigTests(unittest.TestCase):

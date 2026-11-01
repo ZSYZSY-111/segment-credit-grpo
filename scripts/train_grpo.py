@@ -22,12 +22,12 @@ try:
     from .cmexam_prompts import MODE_ADAPTIVE, MODE_COT, MODE_DIRECT, MODES
     from .data_utils import load_tokenizer, parse_messages_record, validate_messages_file
     from .grpo_rewards import RewardConfig, build_reward_functions, describe_reward, self_test
-    from .grpo_segment_credit import make_segment_credit_trainer
+    from .grpo_segment_credit import CREDIT_MODES, MODE_SEGMENT, MODE_SEQUENCE, make_segment_credit_trainer
 except ImportError:
     from cmexam_prompts import MODE_ADAPTIVE, MODE_COT, MODE_DIRECT, MODES
     from data_utils import load_tokenizer, parse_messages_record, validate_messages_file
     from grpo_rewards import RewardConfig, build_reward_functions, describe_reward, self_test
-    from grpo_segment_credit import make_segment_credit_trainer
+    from grpo_segment_credit import CREDIT_MODES, MODE_SEGMENT, MODE_SEQUENCE, make_segment_credit_trainer
 
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-3B-Instruct"
@@ -179,6 +179,8 @@ def parse_args():
     parser.add_argument("--segment-credit-lambda", type=float, default=0.0, help="0 = standard GRPO; 2.0 recommended (+0.5 confidence earns +1)")
     parser.add_argument("--segment-max-probes", type=int, default=8, help="maximum probes per completion; extra segments are merged evenly")
     parser.add_argument("--segment-probe-batch", type=int, default=64, help="batch size of the probe forward pass")
+    parser.add_argument("--credit-mode", choices=CREDIT_MODES, default=MODE_SEGMENT,
+                        help="segment = the method; uniform / shuffled / sequence are the controls (see grpo_segment_credit.py)")
     return parser.parse_args()
 
 
@@ -235,6 +237,13 @@ def validate_args(args):
         raise ValueError("segment_credit_lambda must not be negative")
     if credit_lambda > 0 and args.reward_mode == MODE_DIRECT:
         raise ValueError("segment credit needs cot or adaptive mode (the output must contain a rationale)")
+    credit_mode = getattr(args, "credit_mode", MODE_SEGMENT)
+    if credit_mode not in CREDIT_MODES:
+        raise ValueError(f"credit_mode must be one of {CREDIT_MODES}")
+    if credit_mode != MODE_SEGMENT and credit_lambda <= 0:
+        raise ValueError("a credit control mode needs segment_credit_lambda > 0")
+    if credit_mode == MODE_SEQUENCE and args.scale_rewards != "none":
+        raise ValueError("credit_mode sequence reproduces reward shaping exactly only with scale_rewards none")
     resolve_mode_defaults(args)
     if args.max_steps == 0 or args.max_steps < -1:
         raise ValueError("max_steps must be -1 or a positive integer")
@@ -542,7 +551,8 @@ def main():
     if args.segment_credit_lambda > 0:
         trainer_cls = make_segment_credit_trainer(GRPOTrainer, torch)
         trainer_extra = {"credit_lambda": args.segment_credit_lambda, "max_probes": args.segment_max_probes,
-                         "probe_batch_size": args.segment_probe_batch}
+                         "probe_batch_size": args.segment_probe_batch, "credit_mode": args.credit_mode,
+                         "shuffle_seed": args.seed}
         with (output_dir / "segment_credit.json").open("w", encoding="utf-8") as output_file:
             json.dump(trainer_extra, output_file, ensure_ascii=False, indent=2)
         print(f"segment credit enabled: {trainer_extra}")

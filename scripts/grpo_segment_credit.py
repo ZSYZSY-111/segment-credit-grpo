@@ -8,10 +8,20 @@ earns c_k = Φ_k − Φ_{k−1}; every token in that segment gets advantage = th
 The answer part and the "解析：" prefix keep the sequence-level advantage only. The credits telescope to
 Φ_K − Φ_0, the net confidence the rationale added, so padding earns nothing and misleading segments are penalised.
 
-The pure functions (splitting, character-to-token alignment, credits, advantage assembly) have no torch
-dependency and are unit-tested; the probe forward pass lives in the GRPOTrainer subclass built by
+Control modes (credit_mode) change only how the probed credits are placed, so each isolates one ingredient:
+  * segment   the method: token in segment k gets λ·c_k
+  * uniform   every segment token gets the length-weighted mean credit of its completion, so the summed token
+              advantage is identical to segment mode and only the within-rationale allocation is removed
+  * shuffled  the credits are permuted across the segments of the completion (never the identity), so the multiset
+              of credits is kept and only their alignment with the segments is destroyed
+  * sequence  classic reward shaping with the same signal: Φ_K − Φ_0, centred within the sampling group as a reward
+              would be under scale_rewards="none", added to every completion token
+
+The pure functions (splitting, character-to-token alignment, credits, advantage assembly, the control modes) have
+no torch dependency and are unit-tested; the probe forward pass lives in the GRPOTrainer subclass built by
 make_segment_credit_trainer.
 """
+import random
 import sys
 import time
 from pathlib import Path
@@ -25,6 +35,8 @@ except ImportError:
 RATIONALE_PREFIX = "解析："
 ANSWER_MARKER = "\n答案："
 DEFAULT_MAX_PROBES = 8
+MODE_SEGMENT, MODE_UNIFORM, MODE_SHUFFLED, MODE_SEQUENCE = "segment", "uniform", "shuffled", "sequence"
+CREDIT_MODES = (MODE_SEGMENT, MODE_UNIFORM, MODE_SHUFFLED, MODE_SEQUENCE)
 
 
 def split_rationale(text):
@@ -124,15 +136,58 @@ def probe_text(prompt_text, prefix):
     return f"{prompt_text}{RATIONALE_PREFIX}{prefix}{ANSWER_MARKER}"
 
 
+def uniform_credits(token_ranges, credits):
+    """Replace every aligned segment's credit by the token-length-weighted mean, so Σ len_k·c_k is unchanged.
+    Unaligned segments (range None) keep their credit but carry no tokens, so they do not enter the mean."""
+    weights = [(last - first + 1) if token_range is not None else 0 for token_range, (first, last) in
+               ((r, r if r is not None else (0, -1)) for r in token_ranges)]
+    total = sum(weights)
+    if total == 0:
+        return list(credits)
+    mean = sum(w * c for w, c in zip(weights, credits)) / total
+    return [mean if w > 0 else c for w, c in zip(weights, credits)]
+
+
+def shuffle_credits(credits, rng):
+    """A random permutation of the credits that moves at least one credit when there are two or more distinct
+    positions; a single credit is returned as is."""
+    credits = list(credits)
+    if len(credits) < 2:
+        return credits
+    order = list(range(len(credits)))
+    rng.shuffle(order)
+    if order == list(range(len(credits))):
+        order = order[1:] + order[:1]
+    return [credits[i] for i in order]
+
+
+def group_centered(values, group_size):
+    """Subtract the mean of each consecutive block of group_size values, as TRL centres rewards within a sampling
+    group under scale_rewards="none"."""
+    if group_size < 1 or len(values) % group_size != 0:
+        raise ValueError("values must be a whole number of groups")
+    out = []
+    for start in range(0, len(values), group_size):
+        block = values[start:start + group_size]
+        mean = sum(block) / group_size
+        out.extend(v - mean for v in block)
+    return out
+
+
 def make_segment_credit_trainer(base_cls, torch):
     """Return a GRPOTrainer subclass that adds λ × segment credit to the sequence-level advantages the parent computed, producing (B, T) token-level advantages."""
 
     class SegmentCreditGRPOTrainer(base_cls):
-        def __init__(self, *args, credit_lambda=2.0, max_probes=DEFAULT_MAX_PROBES, probe_batch_size=64, **kwargs):
+        def __init__(self, *args, credit_lambda=2.0, max_probes=DEFAULT_MAX_PROBES, probe_batch_size=64,
+                     credit_mode=MODE_SEGMENT, shuffle_seed=0, **kwargs):
             super().__init__(*args, **kwargs)
+            if credit_mode not in CREDIT_MODES:
+                raise ValueError(f"unknown credit_mode {credit_mode!r}; expected one of {CREDIT_MODES}")
             self.credit_lambda = float(credit_lambda)
             self.max_probes = int(max_probes)
             self.probe_batch_size = int(probe_batch_size)
+            self.credit_mode = credit_mode
+            self._shuffle_rng = random.Random(shuffle_seed)
             self._letter_ids = {}
 
         def _letter_id(self, letter):
@@ -213,7 +268,16 @@ def make_segment_credit_trainer(base_cls, torch):
                 phi_first.append(own[0])
                 phi_last.append(own[-1])
                 all_credits.extend(credits)
-                credit[i] = torch.tensor(token_credit_rows(length, plan["token_ranges"], credits), dtype=torch.float32)
+                if self.credit_mode == MODE_UNIFORM:
+                    credits = uniform_credits(plan["token_ranges"], credits)
+                elif self.credit_mode == MODE_SHUFFLED:
+                    credits = shuffle_credits(credits, self._shuffle_rng)
+                if self.credit_mode != MODE_SEQUENCE:
+                    credit[i] = torch.tensor(token_credit_rows(length, plan["token_ranges"], credits), dtype=torch.float32)
+            if self.credit_mode == MODE_SEQUENCE:
+                # reward-level shaping: the telescoped total, centred within each sampling group, on every token
+                shaped = group_centered([last - first for first, last in zip(phi_first, phi_last)], self.num_generations)
+                credit = torch.tensor(shaped, dtype=torch.float32).unsqueeze(1).expand(batch_size, length).clone()
             credit = credit.to(seq_adv.device) * completion_mask.float()
             token_adv = seq_adv.unsqueeze(1).float() + self.credit_lambda * credit
             token_adv = token_adv * completion_mask.float()
