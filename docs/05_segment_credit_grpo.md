@@ -67,9 +67,9 @@ Early in training the probe shows Φ<sub>K</sub> below Φ<sub>0</sub> on average
 
 ## 6. Limits and open questions
 
-- One seed per arm. The paired test bounds evaluation noise, not training noise.
+- The comparison in section 4 is one seed per arm. The paired test bounds evaluation noise, not training noise; section 8 defines the multi-seed replication.
 - λ was set once (2) and not tuned; the cap of 8 probes per completion and the clause-level split were fixed a priori.
-- The comparison isolates segment credit from standard GRPO but not from a sequence-level shaping baseline (reward + λ(Φ<sub>K</sub> − Φ<sub>0</sub>) with no per-segment split). That ablation is the natural next experiment, together with a shuffled-credit control.
+- Section 4 isolates segment credit from standard GRPO only. The controls that separate where the credit goes from the probed signal itself (uniform and shuffled credit, and sequence-level shaping with reward + λ(Φ<sub>K</sub> − Φ<sub>0</sub>) and no per-segment split) are defined in section 8.
 - The initial adapter was trained with teacher-scored segment weights (`docs/06`); re-running both arms from the control SFT adapter would remove that dependency. The RL procedure itself uses no external model.
 - Both arms are still 3–4 points below the direct-answer model on this benchmark. Segment credit is a claim about how to use a sparse reward, not a claim that rationales beat direct answers here.
 
@@ -78,3 +78,30 @@ Early in training the probe shows Φ<sub>K</sub> below Φ<sub>0</sub> on average
 - TRL 1.8 passes all completions of a step (prompts × samples) to a single `generate` call; `GRPOConfig.generation_batch_size` does not bound that call. `train_grpo.py` generates in chunks of `--generation-chunk` completions and, if a chunk still runs out of memory, releases the exception before freeing the cache and retries in halves. This took the 7B peak from 22–29 GB to 19–20 GB and removed the sporadic out-of-memory failures that had stopped three earlier attempts.
 - Memory is logged per step from a `log` override, because a `TrainerCallback.on_log` fires after the entry has already been written to `log_history`.
 - Checkpoints every 10 steps and an automatic resume from the latest checkpoint make a 3-hour run survive an interruption at the cost of at most 10 steps.
+
+## 8. Controls and replication protocol
+
+*Code: `scripts/grpo_segment_credit.py` (`--credit-mode`), `scripts/aggregate_seeds.py`, `scripts/compare_by_length.py`, `scripts/make_cmb_test_messages.py`; launcher `launch/stage5_segment_credit_grpo.sh`. The numbers in sections 4 and 5 are the single-seed run; results of this protocol will be added when the runs are complete.*
+
+Each control changes exactly one thing about where the probed credits go, so a difference between it and segment credit isolates one ingredient. All controls use the same probes, the same λ = 2, the same start adapter, prompts, samples, steps and seed as the segment-credit arm, so they are compute-matched to it. At equal λ the sequence arm puts its term on every token, several times the per-token magnitude of segment credit, so it is also run at λ = 0.5, where the magnitudes are comparable.
+
+| Arm | Advantage of a rationale token in segment *k* | What it keeps | What it removes |
+|---|---|---|---|
+| segment (the method) | A<sub>seq</sub> + λ·c<sub>k</sub> | everything | |
+| uniform | A<sub>seq</sub> + λ·c̄, c̄ = Σ<sub>k</sub> len<sub>k</sub>·c<sub>k</sub> / Σ<sub>k</sub> len<sub>k</sub> | the summed token advantage of the completion, exactly | the allocation inside the rationale |
+| shuffled | A<sub>seq</sub> + λ·c<sub>π(k)</sub>, π a random non-identity permutation of the completion's segments | the multiset of credits | their alignment with the segments |
+| sequence | A<sub>seq</sub> + λ·(Δ<sub>i</sub> − mean<sub>group</sub> Δ), Δ<sub>i</sub> = Φ<sub>K</sub> − Φ<sub>0</sub>, on every token | the signal as a sequence-level shaped reward (what adding Δ to the reward does under `scale_rewards="none"`) | the per-segment structure altogether |
+
+How the outcomes read, with the validation set's minimum detectable difference of about 0.64 points as the yardstick:
+
+- segment > uniform ≈ shuffled ≈ sequence > standard: the gain comes from assigning credit to the right segments.
+- segment ≈ uniform ≈ sequence > standard: the gain comes from the self-probe as a sequence-level signal; the per-segment split is not what matters.
+- shuffled ≈ segment: the credits act through their variance rather than their information, and a noise control is needed.
+
+**Seeds.** Every arm is trained with seeds 42 and 7 from the same start adapter; more seeds are one variable away (`SEEDS`). `aggregate_seeds.py` reports each seed's paired difference against standard GRPO (bootstrap interval, exact McNemar), the mean and standard deviation of those differences, and every cross-seed pairing, so the conclusion does not rest on one lucky seed pairing.
+
+**Second benchmark.** `make_cmb_test_messages.py` renders the official CMB-Exam test split in the messages format, and `launch/evaluate_cmb_rationale.sh`, or a `cmbtest:<run>` job in the Stage 5 queue, scores an adapter on it in rationale mode with the same per-question records, so the arms can be compared on CMB-test as well as on the CMExam validation split.
+
+**Length.** Both GRPO arms shorten their rationales, and shorter rationales mislead less often. `compare_by_length.py` buckets questions by the standard arm's output length and reports the paired difference inside each bucket, the length-stratified difference and the difference over pairs whose outputs fall in the same bucket. A credit effect survives stratification; a length effect does not.
+
+**λ.** Arms with λ = 1 and λ = 4 (seed 42) bracket the default.

@@ -8,7 +8,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-107%20passing-brightgreen.svg)](tests)
+[![Tests](https://img.shields.io/badge/tests-132%20passing-brightgreen.svg)](tests)
 [![Hardware](https://img.shields.io/badge/hardware-1%C3%97%20RTX%205090%2032GB-lightgrey.svg)](#reproduce)
 
 </div>
@@ -91,7 +91,7 @@ The head learns to judge segments and the model that learned it answers worse, i
 
 ### Limits
 
-One seed per arm; λ fixed at 2; no sequence-level-shaping or shuffled-credit control yet (both are queued); the RL starting adapter was trained with the teacher-scored weights, so a rerun from the control adapter would remove the last external dependency. The RL procedure itself uses no external model. Both GRPO arms remain 3–4 points below the direct-answer model on this benchmark: this is a result about how to use a sparse reward, not a claim that rationales beat direct answers here.
+The comparison above is one seed per arm, with λ fixed at 2. The follow-up is implemented and running: every arm is trained over several seeds and summarised per seed and across seeds (`scripts/aggregate_seeds.py`); three compute-matched credit controls (`--credit-mode uniform | shuffled | sequence`) separate where the credit goes from the probed signal itself; `scripts/compare_by_length.py` stratifies the paired difference by output length; and every arm can be scored on the CMB-Exam test split as a second benchmark. Section 8 of [`docs/05_segment_credit_grpo.md`](docs/05_segment_credit_grpo.md) defines the protocol, and the results will be added here when the runs are complete. The RL starting adapter was trained with the teacher-scored weights, so a rerun from the control adapter would remove the last external dependency. The RL procedure itself uses no external model. Both GRPO arms remain 3–4 points below the direct-answer model on this benchmark: this is a result about how to use a sparse reward, not a claim that rationales beat direct answers here.
 
 ---
 
@@ -205,7 +205,7 @@ Two negative results belong here as well: synthetic questions and statements wri
 git clone https://github.com/ZSYZSY-111/segment-credit-grpo.git
 cd segment-credit-grpo
 pip install -r requirements.txt          # keep the torch build that matches your CUDA
-python -m unittest discover -s tests -t . # 107 tests, no GPU or data needed
+python -m unittest discover -s tests -t . # 132 tests, no GPU or data needed
 ```
 
 Datasets are not redistributed; [`data/README.md`](data/README.md) explains where to get CMExam and CMB, how to build every training file, and how to rebuild the segment-scored rows from the released scores. Then:
@@ -217,7 +217,10 @@ bash launch/stage3_cmb_train.sh             # ~6.5 h
 bash launch/evaluate_cmb.sh <adapter> <name> [reference-predictions.json]
 bash launch/stage4_segment_weighted_sft.sh  # three rationale-SFT arms, ~1 h each + evaluation
 bash launch/stage5_segment_credit_grpo.sh   # standard GRPO ~2 h, segment credit ~3 h, evaluation ~20 min each
+SEEDS="42 7" bash launch/stage5_segment_credit_grpo.sh       # every arm once per seed, then per-seed and cross-seed statistics
 ```
+
+`launch/stage5_segment_credit_grpo.sh` is a job queue: `name:lambda:mode:seed[:extra]` trains and evaluates an arm, and `cmbtest:<run>` scores a finished adapter on CMB-test. The plan in `training_outputs/stage5.env` can be edited while the queue runs, jobs resume from their checkpoints, and a job is never run twice. `launch/autodl_bootstrap.sh` takes a fresh GPU instance from an empty disk to the Stage 5 queue in one command.
 
 Software used for the reported numbers: torch 2.8.0 (CUDA 12.8), transformers 5.13.1, peft 0.19.1, trl 1.8.0, datasets 5.0.0. Hyper-parameters for every reported run are in [`configs/`](configs).
 
@@ -225,13 +228,14 @@ Software used for the reported numbers: torch 2.8.0 (CUDA 12.8), transformers 5.
 
 ```
 scripts/     data builders, trainers (SFT, segment-weighted SFT, GRPO with segment credit), evaluators, analysis
-launch/      one shell script per stage, with the exact hyper-parameters
+launch/      one shell script per stage, with the exact hyper-parameters; Stage 5 runs as a job queue
 configs/     the recorded arguments of every reported run
 results/     every number on this page as JSON, including training curves
 assets/      figures, rendered by tools/make_figures.py from results/
 docs/        method notes: data pipeline, training recipe, evaluation protocol, analysis, segment credit, segment weighting
 data/        dataset instructions and the released segment scores (no question text)
-tests/       unit tests for all data, reward, credit-assignment and scoring code
+tools/       figures, results collection and Markdown tables, all generated from the JSON in results/
+tests/       unit tests for all data, reward, credit-assignment, scoring and analysis code
 ```
 
 | Script | Purpose |
@@ -240,7 +244,8 @@ tests/       unit tests for all data, reward, credit-assignment and scoring code
 | `sentence_split.py` | clause-level segmentation shared by scoring, weighting and credit assignment |
 | `train_sft_score_head.py`, `build_sentence_score_sft.py` | rationale SFT with segment scores as loss weights or as an auxiliary prediction target |
 | `synth_harness/` | annotation and synthesis harness: request cache, budget, hard refusal of evaluation stems, provenance |
-| `build_cot_rl_pool.py`, `compare_headroom_records.py` | RL prompt pool disjoint from the scored SFT; paired 2×2 comparison of per-question records |
+| `build_cot_rl_pool.py`, `compare_headroom_records.py`, `aggregate_seeds.py`, `compare_by_length.py` | RL prompt pool disjoint from the scored SFT; paired 2×2 comparison of per-question records; the same per seed and across seeds; the same stratified by output length |
+| `make_cmb_test_messages.py` | the official CMB-Exam test split in messages format, for rationale-mode evaluation of RL arms on a second benchmark |
 | `build_cmexam_direct_sft.py`, `build_cmexam_rationale_sft.py`, `decontaminate_cmexam_against_cmb.py` | Stage 1 and rationale-style data |
 | `build_shuffle_aug.py`, `merge_lora_soup.py` | Stage 2 augmentation and weight averaging |
 | `build_cmb_train_sft.py` | Stage 3 data with three-layer decontamination and audit files |
@@ -253,8 +258,8 @@ tests/       unit tests for all data, reward, credit-assignment and scoring code
 ## Limitations
 
 - Multiple-choice accuracy only. Nothing here measures clinical reasoning or free-text answers, and the model must not be used for medical decisions.
-- One seed per configuration. The evaluation-noise measurements bound the noise of evaluation, not of training.
-- The CMB validation set is a held-out split of CMB-train, so it shares the test distribution more closely than an independent set would; the RL and segment-weighting results are on the CMExam validation split and have not been evaluated on CMB-test.
+- The reported numbers come from one seed per configuration. The evaluation-noise measurements bound the noise of evaluation, not of training; the multi-seed replication and the credit controls are implemented (docs/05, section 8) and their results will be added when complete.
+- The CMB validation set is a held-out split of CMB-train, so it shares the test distribution more closely than an independent set would; the RL and segment-weighting results reported here are on the CMExam validation split; `launch/evaluate_cmb_rationale.sh` scores RL arms on CMB-test.
 
 ## Acknowledgements
 

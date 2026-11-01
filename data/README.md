@@ -25,7 +25,7 @@ Build the training files:
 python scripts/build_cmexam_direct_sft.py --input-dir data/CMExam/data --output-dir data
 python scripts/decontaminate_cmexam_against_cmb.py \
   --cmb-test-file data/CMB/CMB-Exam/CMB-test/CMB-test-choice-question-merge.json \
-  --train-file data/cmexam_sft_train.jsonl --validation-file data/cmexam_sft_validation.jsonl
+  --train-file data/cmexam_sft_train.jsonl --validation-file data/cmexam_sft_validation.jsonl --report-file data/cmexam_sft_report.json
 
 # expected: 52,369 train rows (sha256 e15ff4a5c7d6...050a830) and 6,657 validation rows (sha256 95da75fcbe70...2950aaf)
 
@@ -62,7 +62,7 @@ python scripts/decontaminate_cmexam_against_cmb.py \
   --cmb-test-file data/CMB/CMB-Exam/CMB-test/CMB-test-choice-question-merge.json \
   --train-file data/cmexam_rationale/cmexam_rationale_sft_train.jsonl \
   --validation-file data/cmexam_rationale/cmexam_rationale_sft_validation.jsonl \
-  --report-file data/cmexam_rationale/cmexam_rationale_decontamination_report.json
+  --report-file data/cmexam_rationale/cmexam_rationale_sft_report.json
 ```
 
 ### Segment scores
