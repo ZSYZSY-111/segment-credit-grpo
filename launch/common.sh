@@ -1,4 +1,7 @@
 # Shared settings. Override any of these from the environment.
+# launch/local.env (gitignored) holds the machine's own defaults, e.g. the local model directory and caches; the
+# bootstrap writes it so that every launcher, including a queue restarted by stage5_replan.sh, sees the same paths.
+[ -f "$(dirname "${BASH_SOURCE[0]}")/local.env" ] && source "$(dirname "${BASH_SOURCE[0]}")/local.env"
 export PY=${PY:-python}
 export BASE=${BASE:-Qwen/Qwen2.5-7B-Instruct}
 export DATA=${DATA:-data}
